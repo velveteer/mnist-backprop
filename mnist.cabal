@@ -1,0 +1,80 @@
+-- This file has been generated from package.yaml by hpack version 0.28.2.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: a127bc9a3e29d92fe79d969c87a14656c0c4019dbdb465b5261c7afc54d3fc32
+
+name:           mnist
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/githubuser/backprop#readme>
+homepage:       https://github.com/githubuser/mnist#readme
+bug-reports:    https://github.com/githubuser/mnist/issues
+author:         Author name here
+maintainer:     example@example.com
+copyright:      2018 Author name here
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
+extra-source-files:
+    ChangeLog.md
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/githubuser/mnist
+
+library
+  exposed-modules:
+      Lib
+  other-modules:
+      Paths_mnist
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.7 && <5
+  default-language: Haskell2010
+
+executable mnist-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_mnist
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
+  build-depends:
+      backprop
+    , base >=4.7 && <5
+    , bifunctors
+    , deepseq
+    , ghc-typelits-knownnat
+    , ghc-typelits-natnormalise
+    , hmatrix
+    , hmatrix-backprop
+    , hmatrix-vector-sized
+    , lens
+    , microlens
+    , microlens-th
+    , mnist-idx
+    , mwc-random
+    , one-liner-instances
+    , random
+    , split
+    , time
+    , transformers
+    , vector
+    , vector-sized
+  default-language: Haskell2010
+
+test-suite mnist-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_mnist
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , mnist
+  default-language: Haskell2010

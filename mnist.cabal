@@ -2,7 +2,7 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: a127bc9a3e29d92fe79d969c87a14656c0c4019dbdb465b5261c7afc54d3fc32
+-- hash: 0561f843c813a05b38af2826eb884a93dd316dcfa0e6944fb844cf85c63626f2
 
 name:           mnist
 version:        0.1.0.0
@@ -24,23 +24,12 @@ source-repository head
   type: git
   location: https://github.com/githubuser/mnist
 
-library
-  exposed-modules:
-      Lib
-  other-modules:
-      Paths_mnist
-  hs-source-dirs:
-      src
-  build-depends:
-      base >=4.7 && <5
-  default-language: Haskell2010
-
 executable mnist-exe
   main-is: Main.hs
   other-modules:
       Paths_mnist
   hs-source-dirs:
-      app
+      src
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
   build-depends:
       backprop
@@ -58,23 +47,12 @@ executable mnist-exe
     , mnist-idx
     , mwc-random
     , one-liner-instances
+    , primitive
     , random
+    , singletons
     , split
     , time
     , transformers
     , vector
     , vector-sized
-  default-language: Haskell2010
-
-test-suite mnist-test
-  type: exitcode-stdio-1.0
-  main-is: Spec.hs
-  other-modules:
-      Paths_mnist
-  hs-source-dirs:
-      test
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
-  build-depends:
-      base >=4.7 && <5
-    , mnist
   default-language: Haskell2010

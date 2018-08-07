@@ -24,7 +24,7 @@ dependencies:
 
 executables:
   mnist-exe:
-    main:                Main.hs
+    main:                Mnist.hs
     source-dirs:         src
     ghc-options:
     - -threaded
@@ -54,3 +54,8 @@ executables:
     - transformers
     - vector
     - vector-sized
+
+    c-sources: 
+    - cbits/im2col.c
+
+    cc-options: -std=c99 -O3 -msse4.2 -Wall -Werror -DCABAL=1

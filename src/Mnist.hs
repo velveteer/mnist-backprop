@@ -1,7 +1,9 @@
+-- {-# LANGUAGE AllowAmbiguousTypes                      #-}
 {-# LANGUAGE BangPatterns                             #-}
 {-# LANGUAGE DataKinds                                #-}
 {-# LANGUAGE DeriveGeneric                            #-}
 {-# LANGUAGE FlexibleContexts                         #-}
+{-# LANGUAGE FlexibleInstances                        #-}
 {-# LANGUAGE GADTs                                    #-}
 {-# LANGUAGE LambdaCase                               #-}
 {-# LANGUAGE PartialTypeSignatures                    #-}
@@ -17,9 +19,9 @@
 {-# OPTIONS_GHC -Wno-unused-top-binds                 #-}
 {-# OPTIONS_GHC -fno-warn-orphans                     #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures     #-}
-{-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
-{-# OPTIONS_GHC -fplugin GHC.TypeLits.Normalise       #-}
 {-# OPTIONS_GHC -fwarn-redundant-constraints          #-}
+-- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
+-- {-# OPTIONS_GHC -fplugin GHC.TypeLits.Normalise       #-}
 
 module Main where
 import           Control.DeepSeq
@@ -32,13 +34,16 @@ import           Data.Bitraversable
 import           Data.Foldable
 import           Data.IDX
 import           Data.List.Split
+import           Data.Maybe
+import           Data.Proxy
 import           Data.Time.Clock
 import           Data.Traversable
 import           Data.Tuple
 import           GHC.Generics                        (Generic)
 import           GHC.TypeLits
 import           Lens.Micro                          hiding ((&))
-import           Numeric.Backprop (Backprop, (^^.), auto, isoVar2, evalBP, evalBP2, gradBP, constVar)
+import           Mnist.Internal.Convolution
+import           Numeric.Backprop                    hiding ((:&))
 import           Numeric.LinearAlgebra.Static.Backprop -- hmatrix-backprop
 import           Numeric.LinearAlgebra.Static.Vector (vecL, vecR, lVec, rVec)
 import           Numeric.OneLiner
@@ -51,6 +56,7 @@ import qualified Numeric.LinearAlgebra               as HM -- non-backprop hmatr
 import qualified Numeric.LinearAlgebra.Static        as HMS -- hmatrix with type-checked operations :D
 import qualified System.Random.MWC                   as MWC
 import qualified System.Random.MWC.Distributions     as MWC
+import Debug.Trace
 
 type Model p a b = forall z. Reifies z W
   => BVar z p
@@ -117,6 +123,79 @@ feedForward
 feedForward (w :&& b) x = w #> x + b
 {-# INLINE feedForward #-}
 
+-- TODO
+-- Grenade pulled in im2col from Caffe -- https://github.com/HuwCampbell/grenade/blob/master/src/Grenade/Layers/Internal/Convolution.hs
+-- Could convert to backprop op? https://github.com/HuwCampbell/grenade/blob/master/src/Grenade/Layers/Convolution.hs#L174
+-- All args except filter weights and 2d input are hyperparams for the convolution
+
+convolution
+  :: ( KnownNat kernelSize
+     , KnownNat filters
+     , KnownNat stride
+     , KnownNat inputRows
+     , KnownNat inputCols
+     , KnownNat (kernelSize * kernelSize * channels)
+     , KnownNat (inputRows * channels)
+     , KnownNat ((inputRows - filters + 1) * filters)
+     , KnownNat (inputCols - filters + 1)
+     )
+     => Proxy kernelSize
+     -> Proxy filters
+     -> Proxy stride
+     -> Proxy inputRows
+     -> Proxy inputCols
+     -> Proxy channels
+     -> Model
+        (L (kernelSize * kernelSize * channels) filters)
+        (L (inputRows * channels) inputCols)
+        (L ((inputRows - filters + 1) * filters) (inputCols - filters + 1))
+convolution k' fs' st' ix' iy' cs' =
+  liftOp2 . op2 $ \kernel input ->
+    (
+      let ix = fromIntegral $ natVal ix'
+          iy = fromIntegral $ natVal iy'
+          kx = fromIntegral $ natVal k'
+          ky = fromIntegral $ natVal k'
+          sx = fromIntegral $ natVal st'
+          sy = fromIntegral $ natVal st'
+          ox = ix - (fromIntegral $ natVal fs') + 1
+          oy = iy - (fromIntegral $ natVal fs') + 1
+
+          ex = HMS.extract input
+          ek = HMS.extract kernel
+          c  = vid2col kx ky sx sy ix iy ex
+          mt = c HM.<> ek
+          r  = col2vid 1 1 1 1 ox oy mt
+      in
+          fromJust . HMS.create $ r
+
+    , \dzdy ->
+        let ex = HMS.extract input
+            ix = fromIntegral $ natVal ix'
+            iy = fromIntegral $ natVal iy'
+            kx = fromIntegral $ natVal k'
+            ky = fromIntegral $ natVal k'
+            sx = fromIntegral $ natVal st'
+            sy = fromIntegral $ natVal st'
+            ox = ix - (fromIntegral $ natVal fs') + 1
+            oy = iy - (fromIntegral $ natVal fs') + 1
+
+            c  = vid2col kx ky sx sy ix iy ex
+
+            eo = HMS.extract dzdy
+            ek = HMS.extract kernel
+
+            vs = vid2col 1 1 1 1 ox oy eo
+
+            kN = trace ("here") fromJust . HMS.create $ HM.tr c HM.<> vs
+
+            dW = vs HM.<> HM.tr ek
+
+            xW = col2vid kx ky sx sy ix iy dW
+        in
+            (kN, fromJust . HMS.create $ xW) -- This is most certainly wrong
+    )
+
 logistic :: Floating a => a -> a
 logistic x = 1 / (1 + exp (-x))
 {-# INLINE logistic #-}
@@ -127,16 +206,16 @@ feedForwardLog
 feedForwardLog wb = logistic . feedForward wb
 {-# INLINE feedForwardLog #-}
 
-relu :: Floating a => a -> a
-relu x = absx - 0.5 * absx
-   where absx = (abs x) + x
-{-# INLINE relu #-}
+reLU :: (Num a, Ord a) => a -> a
+reLU x | x < 0     = 0
+       | otherwise = x
+{-# INLINE reLU #-}
 
-feedForwardReLu
+feedForwardReLU
     :: (KnownNat i, KnownNat o)
     => Model (L o i :& R o) (R i) (R o)
-feedForwardReLu wb = relu . feedForward wb
-{-# INLINE feedForwardReLu #-}
+feedForwardReLU wb = vmap reLU . feedForward wb
+{-# INLINE feedForwardReLU #-}
 
 softMax :: (KnownNat n, Reifies s W) => BVar s (R n) -> BVar s (R n)
 softMax x = konst (1 / sumElements expx) * expx
@@ -206,14 +285,15 @@ testNet f !p !xs = sum (map (uncurry test) xs) / fromIntegral (length xs)
 infixr 8 <~
 {-# INLINE (<~) #-}
 
--- The type wildcard here means GHC can infer the type of the model params
+-- The type wildcard here means GHC should infer the type of the model params
 -- If you look up at the composition operator, you can see how the tupling
 -- of model parameters can nest infinitely, and this would be tedious to write by hand
 model :: Model _ (R 784) (R 10)
 model =
    feedForwardSoftMax @100 @10
-   <~ feedForwardReLu @300 @100
-   <~ feedForwardReLu @784 @300
+   <~ feedForwardLog @300 @100
+   <~ feedForwardLog @500 @300
+   <~ feedForwardLog @784 @500
 {-# INLINE model #-}
 
 main :: IO ()
@@ -223,6 +303,7 @@ main = MWC.withSystemRandom $ \g -> do
    putStrLn "Loaded data."
 
    p0 <- MWC.uniformR (-0.5, 0.5) g
+
    flip evalStateT p0 . forM_ [1..] $ \e -> do
       train' <- liftIO . fmap V.toList $ MWC.uniformShuffle (V.fromList train) g
       liftIO $ printf "[Epoch %d]\n" (e :: Int)
@@ -239,6 +320,8 @@ main = MWC.withSystemRandom $ \g -> do
              testScore  = testNet model newP test
          printf "Training error:   %.2f%%\n" ((1 - trainScore) * 100)
          printf "Validation error: %.2f%%\n" ((1 - testScore ) * 100)
+
+         -- TODO: Serialize trained params so we can save/load them
 
          -- Because we are in the StateT monad, the next iteration of the loop
          -- will be passed newP (the updated parameters for the model)

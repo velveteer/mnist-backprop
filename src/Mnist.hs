@@ -20,6 +20,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans                     #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures     #-}
 {-# OPTIONS_GHC -fwarn-redundant-constraints          #-}
+{-# OPTIONS_GHC -fplugin GHC.TypeLits.Extra.Solver    #-}
 -- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 -- {-# OPTIONS_GHC -fplugin GHC.TypeLits.Normalise       #-}
 
@@ -41,10 +42,11 @@ import           Data.Traversable
 import           Data.Tuple
 import           GHC.Generics                        (Generic)
 import           GHC.TypeLits
+import           GHC.TypeLits.Extra
 import           Lens.Micro                          hiding ((&))
 import           Mnist.Internal.Convolution
 import           Numeric.Backprop                    hiding ((:&))
-import           Numeric.LinearAlgebra.Static.Backprop -- hmatrix-backprop
+import           Numeric.LinearAlgebra.Static.Backprop                          -- hmatrix-backprop
 import           Numeric.LinearAlgebra.Static.Vector (vecL, vecR, lVec, rVec)
 import           Numeric.OneLiner
 import           Text.Printf
@@ -52,7 +54,8 @@ import qualified Data.Vector                         as V
 import qualified Data.Vector.Generic                 as VG
 import qualified Data.Vector.Storable.Sized          as SVS
 import qualified Data.Vector.Unboxed                 as VU
-import qualified Numeric.LinearAlgebra               as HM -- non-backprop hmatrix
+import qualified Numeric.LinearAlgebra               as HM  -- non-backprop hmatrix
+import qualified Numeric.LinearAlgebra.Data          as HMD
 import qualified Numeric.LinearAlgebra.Static        as HMS -- hmatrix with type-checked operations :D
 import qualified System.Random.MWC                   as MWC
 import qualified System.Random.MWC.Distributions     as MWC
@@ -123,11 +126,6 @@ feedForward
 feedForward (w :&& b) x = w #> x + b
 {-# INLINE feedForward #-}
 
--- TODO
--- Grenade pulled in im2col from Caffe -- https://github.com/HuwCampbell/grenade/blob/master/src/Grenade/Layers/Internal/Convolution.hs
--- Could convert to backprop op? https://github.com/HuwCampbell/grenade/blob/master/src/Grenade/Layers/Convolution.hs#L174
--- All args except filter weights and 2d input are hyperparams for the convolution
-
 convolution
   :: ( KnownNat kernelSize
      , KnownNat filters
@@ -136,8 +134,8 @@ convolution
      , KnownNat inputCols
      , KnownNat (kernelSize * kernelSize * channels)
      , KnownNat (inputRows * channels)
-     , KnownNat ((inputRows - filters + 1) * filters)
-     , KnownNat (inputCols - filters + 1)
+     , KnownNat (((Div (inputRows - filters) stride) + 1) * filters)
+     , KnownNat (((Div (inputCols - filters) stride) + 1))
      )
      => Proxy kernelSize
      -> Proxy filters
@@ -148,9 +146,9 @@ convolution
      -> Model
         (L (kernelSize * kernelSize * channels) filters)
         (L (inputRows * channels) inputCols)
-        (L ((inputRows - filters + 1) * filters) (inputCols - filters + 1))
+        (L (((Div (inputRows - filters) stride) + 1) * filters) ((Div (inputCols - filters) stride) + 1))
 convolution k' fs' st' ix' iy' cs' =
-  liftOp2 . op2 $ \kernel input ->
+  liftOp2 . op2 $ \weights input ->
     (
       let ix = fromIntegral $ natVal ix'
           iy = fromIntegral $ natVal iy'
@@ -158,43 +156,70 @@ convolution k' fs' st' ix' iy' cs' =
           ky = fromIntegral $ natVal k'
           sx = fromIntegral $ natVal st'
           sy = fromIntegral $ natVal st'
-          ox = ix - (fromIntegral $ natVal fs') + 1
-          oy = iy - (fromIntegral $ natVal fs') + 1
-
+          ox = ((ix - (fromIntegral $ natVal fs')) `div` sx) + 1
+          oy = ((iy - (fromIntegral $ natVal fs')) `div` sx) + 1
           ex = HMS.extract input
-          ek = HMS.extract kernel
+          ek = HMS.extract weights
+
           c  = vid2col kx ky sx sy ix iy ex
           mt = c HM.<> ek
           r  = col2vid 1 1 1 1 ox oy mt
+          result = fromJust . HMS.create $ r
       in
-          fromJust . HMS.create $ r
+          trace "convolution forwards" result
 
     , \dzdy ->
-        let ex = HMS.extract input
-            ix = fromIntegral $ natVal ix'
+        let ix = fromIntegral $ natVal ix'
             iy = fromIntegral $ natVal iy'
             kx = fromIntegral $ natVal k'
             ky = fromIntegral $ natVal k'
             sx = fromIntegral $ natVal st'
             sy = fromIntegral $ natVal st'
-            ox = ix - (fromIntegral $ natVal fs') + 1
-            oy = iy - (fromIntegral $ natVal fs') + 1
+            ox = ((ix - (fromIntegral $ natVal fs')) `div` sx) + 1
+            oy = ((iy - (fromIntegral $ natVal fs')) `div` sx) + 1
 
-            c  = vid2col kx ky sx sy ix iy ex
-
+            ex = HMS.extract input
+            ek = HMS.extract weights
             eo = HMS.extract dzdy
-            ek = HMS.extract kernel
 
+            -- what is this actually doing?
+            -- should be taking output from forward pass and reshaping it
+            -- so we can do convolutions via matrix mult
             vs = vid2col 1 1 1 1 ox oy eo
 
-            kN = trace ("here") fromJust . HMS.create $ HM.tr c HM.<> vs
+            -- TODO: Gradient for weights -- I cannot get this to work -- WHY?
+            -- It currently works if filters ^ 2 == weights rows (kernelSize ^ 2 * channels) -- but that's dumb
+            c  = vid2col kx ky sx sy ix iy ex -- turn input image into columns
+            dW = HM.tr c HM.<> vs
 
-            dW = vs HM.<> HM.tr ek
-
-            xW = col2vid kx ky sx sy ix iy dW
+            -- Gradient for input -- This seems to work fine
+            dX' = vs HM.<> HM.tr ek -- convolve (via matrix mult) output with transposed weights matrix
+            dX = col2vid kx ky sx sy ix iy dX' -- stretch columns back into image dimensions
         in
-            (kN, fromJust . HMS.create $ xW) -- This is most certainly wrong
+            trace ("backwards") (fromJust . HMS.create $ dW, fromJust . HMS.create $ dX)
     )
+{-# INLINE convolution #-}
+
+flattenLayer :: (KnownNat o, KnownNat i, KnownNat (o * i), Reifies s W) => BVar s (L o i) -> BVar s (R (o * i))
+flattenLayer = liftOp1 . op1 $ \input ->
+  (
+    let ex = HMS.extract input
+        flattened = HMD.flatten ex
+        result = fromJust . HMS.create $ flattened
+      in
+        trace "flatten forwards" result
+  ,
+    \dzdy ->
+      let ex = HMS.extract dzdy
+          ei = HMS.extract input
+        in
+          trace ("flatten backwards") fromJust . HMS.create $ HMD.reshape (HMD.cols ei) ex
+  )
+{-# INLINE flattenLayer #-}
+
+-- TODO Add type annotation?
+convLayer k fs st ix io cs p = vmap reLU . flattenLayer . convolution k fs st ix io cs p
+{-# INLINE convLayer #-}
 
 logistic :: Floating a => a -> a
 logistic x = 1 / (1 + exp (-x))
@@ -238,9 +263,9 @@ crossEntropy !targ !res = -(log res <.> constVar targ)
 {-# INLINE crossEntropy #-}
 
 netErr
-   :: forall i o p s. (KnownNat o, Reifies s W)
-   => Model p (R i) (R o)
-   -> R i
+   :: forall m n o p s. (KnownNat o, Reifies s W)
+   => Model p (L m n) (R o)
+   -> L m n
    -> R o
    -> BVar s p
    -> BVar s Double
@@ -248,24 +273,24 @@ netErr f !x !targ !p = crossEntropy targ $ f p $ auto x
 {-# INLINE netErr #-}
 
 trainModel
-   :: forall i o p. (KnownNat o, Backprop p, Fractional p)
+   :: forall m n o p. (KnownNat o, Backprop p, Fractional p)
    => Double                -- ^ learning rate
-   -> Model p (R i) (R o)
+   -> Model p (L m n) (R o)
    -> p                     -- ^ initial params
-   -> [(R i, R o)]          -- ^ input and target pairs
+   -> [(L m n, R o)]        -- ^ input and target pairs
    -> p                     -- ^ trained params
 trainModel r f = foldl' (\p (x,y) -> p - realToFrac r * gradBP (netErr f x y) p)
 {-# INLINE trainModel #-}
 
 testNet
-   :: forall i o p. (KnownNat o)
-   => Model p (R i) (R o)
+   :: forall m n o p. (KnownNat o)
+   => Model p (L m n) (R o)
    -> p
-   -> [(R i, R o)]
+   -> [(L m n, R o)]
    -> Double
 testNet f !p !xs = sum (map (uncurry test) xs) / fromIntegral (length xs)
    where
-      test :: R i -> R o -> Double -- test if the max index is correct
+      test :: L m n -> R o -> Double -- test if the max index is correct
       -- second argument here is using ViewPatterns extension of GHC
       test x (HMS.extract->t)
          | HM.maxIndex t == HM.maxIndex (HMS.extract r) = 1
@@ -286,14 +311,14 @@ infixr 8 <~
 {-# INLINE (<~) #-}
 
 -- The type wildcard here means GHC should infer the type of the model params
--- If you look up at the composition operator, you can see how the tupling
--- of model parameters can nest infinitely, and this would be tedious to write by hand
-model :: Model _ (R 784) (R 10)
+-- We could define it but then we'd have to update it manually every time we add a new "layer" here
+-- Each layer's parameters (weights + bias) are tupled together so we can pattern match on them (see <~ operator above)
+model :: Model _ (L 28 28) (R 10)
 model =
    feedForwardSoftMax @100 @10
-   <~ feedForwardLog @300 @100
-   <~ feedForwardLog @500 @300
-   <~ feedForwardLog @784 @500
+   <~ feedForwardLog @500 @100
+   <~ feedForwardLog @2880 @500
+   <~ convLayer (Proxy @5) (Proxy @5) (Proxy @1) (Proxy @28) (Proxy @28) (Proxy @1)
 {-# INLINE model #-}
 
 main :: IO ()
@@ -303,6 +328,7 @@ main = MWC.withSystemRandom $ \g -> do
    putStrLn "Loaded data."
 
    p0 <- MWC.uniformR (-0.5, 0.5) g
+   -- print (show $ take 10 train)
 
    flip evalStateT p0 . forM_ [1..] $ \e -> do
       train' <- liftIO . fmap V.toList $ MWC.uniformShuffle (V.fromList train) g
@@ -312,7 +338,7 @@ main = MWC.withSystemRandom $ \g -> do
          printf "(Batch %d)\n" (b :: Int)
 
          t0 <- getCurrentTime
-         newP <- evaluate . force $ trainModel (rate * fromIntegral e) model ps0 chnk
+         newP <- evaluate . force $ trainModel (rate ^ fromIntegral e) model ps0 chnk
          t1 <- getCurrentTime
          printf "Trained on %d points in %s.\n" batch (show (t1 `diffUTCTime` t0))
 
@@ -327,13 +353,13 @@ main = MWC.withSystemRandom $ \g -> do
          -- will be passed newP (the updated parameters for the model)
          return ((), newP)
    where
-      rate = 0.001
+      rate = 0.02
       batch = 500
 
 loadMNIST
    :: FilePath
    -> FilePath
-   -> IO (Maybe [(R 784, R 10)])
+   -> IO (Maybe [(L 28 28, R 10)])
 loadMNIST fpI fpL = runMaybeT $ do
    i <- MaybeT          $ decodeIDXFile       fpI
    l <- MaybeT          $ decodeIDXLabelsFile fpL
@@ -341,7 +367,7 @@ loadMNIST fpI fpL = runMaybeT $ do
    r <- MaybeT . return $ for d (bitraverse mkImage mkLabel . swap)
    liftIO . evaluate $ force r
       where
-         mkImage :: VU.Vector Int -> Maybe (R 784)
-         mkImage = HMS.create . VG.convert . VG.map (\i -> fromIntegral i / 255)
+         mkImage :: VU.Vector Int -> Maybe (L 28 28)
+         mkImage = HMS.create . HMD.reshape 28 . VG.convert . VG.map (\i -> fromIntegral i / 255)
          mkLabel :: Int -> Maybe (R 10)
          mkLabel n = HMS.create $ HM.build 10 (\i -> if round i == n then 1 else 0)

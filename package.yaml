@@ -30,11 +30,12 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
-    - -O2
+    - -O0
     dependencies:
     - backprop
     - bifunctors
     - deepseq
+    - ghc-typelits-extra
     - ghc-typelits-knownnat
     - ghc-typelits-natnormalise
     - hmatrix

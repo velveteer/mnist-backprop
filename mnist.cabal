@@ -2,7 +2,7 @@
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: dc27ef14d7fe6a0f14dfc9c43f34e850be1535d3a5a90d057699bf76752384e1
+-- hash: 8a2a020d2e6bbda7efbb91ba39af169a3401508a1c3975919958a74120cf4ee3
 
 name:           mnist
 version:        0.1.0.0
@@ -31,7 +31,7 @@ executable mnist-exe
       Paths_mnist
   hs-source-dirs:
       src
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O0
   cc-options: -std=c99 -O3 -msse4.2 -Wall -Werror -DCABAL=1
   c-sources:
       cbits/im2col.c
@@ -40,6 +40,7 @@ executable mnist-exe
     , base >=4.7 && <5
     , bifunctors
     , deepseq
+    , ghc-typelits-extra
     , ghc-typelits-knownnat
     , ghc-typelits-natnormalise
     , hmatrix

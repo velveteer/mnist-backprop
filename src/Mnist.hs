@@ -137,6 +137,10 @@ convolution
      , KnownNat (((Div (inputRows - filters) stride) + 1) * filters)
      , KnownNat (((Div (inputCols - filters) stride) + 1))
      )
+     -- | These proxies introduce type variables into the scope
+     --   so GHC can do type level arithmetic to infer the Model types
+     -- | Example: convolution (Proxy @3) (Proxy @12) (Proxy @1) (Proxy @28) (Proxy @28) (Proxy @1)
+     --   will return a function of type Model (L 9 12) (L 28 28) (L 204 17)
      => Proxy kernelSize
      -> Proxy filters
      -> Proxy stride
@@ -144,43 +148,43 @@ convolution
      -> Proxy inputCols
      -> Proxy channels
      -> Model
-        (L (kernelSize * kernelSize * channels) filters)
+        (L (kernelSize * kernelSize * channels) filters) -- TODO: Add bias
         (L (inputRows * channels) inputCols)
         (L (((Div (inputRows - filters) stride) + 1) * filters) ((Div (inputCols - filters) stride) + 1))
 convolution k' fs' st' ix' iy' cs' =
-  liftOp2 . op2 $ \weights input ->
+  liftOp2 . op2 $ \kernel input ->
+
+    -- natVal "reflects" the type level Nat into a term level Int.
+    -- Example: for ix' (input rows) this works because we told the type checker that the function argument ix' is a Proxy of a type
+    -- that has a KnownNat constraint. So the type level Nat is brought into scope when we pass Proxy @28 (which is sugar for Proxy :: Proxy 28)
+    -- Hyperparameters as types. Neat.
+    let ix = fromIntegral $ natVal ix'
+        iy = fromIntegral $ natVal iy'
+        kx = fromIntegral $ natVal k'
+        ky = fromIntegral $ natVal k'
+        sx = fromIntegral $ natVal st'
+        sy = fromIntegral $ natVal st'
+        ox = ((ix - (fromIntegral $ natVal fs')) `div` sx) + 1
+        oy = ((iy - (fromIntegral $ natVal fs')) `div` sx) + 1
+        ex = HMS.extract input
+        ek = HMS.extract kernel
+
+        -- Transform the 3D input matrix into a (W*H, K*K*D) matrix
+        c  = vid2col kx ky sx sy ix iy ex
+    in
+
     (
-      let ix = fromIntegral $ natVal ix'
-          iy = fromIntegral $ natVal iy'
-          kx = fromIntegral $ natVal k'
-          ky = fromIntegral $ natVal k'
-          sx = fromIntegral $ natVal st'
-          sy = fromIntegral $ natVal st'
-          ox = ((ix - (fromIntegral $ natVal fs')) `div` sx) + 1
-          oy = ((iy - (fromIntegral $ natVal fs')) `div` sx) + 1
-          ex = HMS.extract input
-          ek = HMS.extract weights
-
-          c  = vid2col kx ky sx sy ix iy ex
-          mt = c HM.<> ek
+      -- FORWARD PASS
+      -- This is the actual "convolution"
+      let mt = c HM.<> ek
+          -- Stretch the image back to the output dimensions
           r  = col2vid 1 1 1 1 ox oy mt
-          result = fromJust . HMS.create $ r
       in
-          trace "convolution forwards" result
+          fromJust . HMS.create $ r
 
-    , \dzdy ->
-        let ix = fromIntegral $ natVal ix'
-            iy = fromIntegral $ natVal iy'
-            kx = fromIntegral $ natVal k'
-            ky = fromIntegral $ natVal k'
-            sx = fromIntegral $ natVal st'
-            sy = fromIntegral $ natVal st'
-            ox = ((ix - (fromIntegral $ natVal fs')) `div` sx) + 1
-            oy = ((iy - (fromIntegral $ natVal fs')) `div` sx) + 1
-
-            ex = HMS.extract input
-            ek = HMS.extract weights
-            eo = HMS.extract dzdy
+    , -- BACKWARD PASS (see backprop ops for more info)
+      \dzdy ->
+        let eo = HMS.extract dzdy
 
             -- what is this actually doing?
             -- should be taking output from forward pass and reshaping it
@@ -188,15 +192,16 @@ convolution k' fs' st' ix' iy' cs' =
             vs = vid2col 1 1 1 1 ox oy eo
 
             -- TODO: Gradient for weights -- I cannot get this to work -- WHY?
-            -- It currently works if filters ^ 2 == weights rows (kernelSize ^ 2 * channels) -- but that's dumb
-            c  = vid2col kx ky sx sy ix iy ex -- turn input image into columns
+            -- It currently only works when filters === kernelSize -- wat
             dW = HM.tr c HM.<> vs
 
             -- Gradient for input -- This seems to work fine
-            dX' = vs HM.<> HM.tr ek -- convolve (via matrix mult) output with transposed weights matrix
-            dX = col2vid kx ky sx sy ix iy dX' -- stretch columns back into image dimensions
+            -- convolve (via matrix mult) output with transposed weights matrix http://soumith.ch/ex/pages/2014/08/07/why-rotate-weights-convolution-gradient/
+            dX' = vs HM.<> HM.tr ek
+            dX = col2vid kx ky sx sy ix iy dX' -- stretch back into image dimensions
         in
-            trace ("backwards") (fromJust . HMS.create $ dW, fromJust . HMS.create $ dX)
+            -- trace ("convolution backwards") (fromJust . HMS.create $ dW, fromJust . HMS.create $ dX)
+            (fromJust . HMS.create $ dW, fromJust . HMS.create $ dX)
     )
 {-# INLINE convolution #-}
 
@@ -207,13 +212,15 @@ flattenLayer = liftOp1 . op1 $ \input ->
         flattened = HMD.flatten ex
         result = fromJust . HMS.create $ flattened
       in
-        trace "flatten forwards" result
+        -- trace "flatten forwards" result
+        result
   ,
     \dzdy ->
       let ex = HMS.extract dzdy
           ei = HMS.extract input
         in
-          trace ("flatten backwards") fromJust . HMS.create $ HMD.reshape (HMD.cols ei) ex
+          -- trace ("flatten backwards") fromJust . HMS.create $ HMD.reshape (HMD.cols ei) ex
+          fromJust . HMS.create $ HMD.reshape (HMD.cols ei) ex
   )
 {-# INLINE flattenLayer #-}
 
@@ -317,8 +324,8 @@ model :: Model _ (L 28 28) (R 10)
 model =
    feedForwardSoftMax @100 @10
    <~ feedForwardLog @500 @100
-   <~ feedForwardLog @2880 @500
-   <~ convLayer (Proxy @5) (Proxy @5) (Proxy @1) (Proxy @28) (Proxy @28) (Proxy @1)
+   <~ feedForwardLog @2028 @500
+   <~ convLayer (Proxy @3) (Proxy @3) (Proxy @1) (Proxy @28) (Proxy @28) (Proxy @1)
 {-# INLINE model #-}
 
 main :: IO ()
@@ -353,8 +360,8 @@ main = MWC.withSystemRandom $ \g -> do
          -- will be passed newP (the updated parameters for the model)
          return ((), newP)
    where
-      rate = 0.02
-      batch = 500
+      rate = 0.01
+      batch = 30
 
 loadMNIST
    :: FilePath
